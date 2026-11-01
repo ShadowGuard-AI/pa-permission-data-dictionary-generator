@@ -24,7 +24,7 @@ def setup_argparse() -> argparse.ArgumentParser:
         "-i",
         type=str,
         required=True,
-        help="Path to the directory or file containing permission data.",
+        help="Path to a file containing permission data. Directory input is not supported.",
     )
     parser.add_argument(
         "--output-file",
@@ -81,12 +81,8 @@ def load_permission_data(input_path: str, permission_system: str) -> List[Dict[s
             logging.error(f"An unexpected error occurred while reading the input file: {e}")
             raise
     elif os.path.isdir(input_path):
-        # Placeholder for directory scanning and permission extraction.
-        # This is where permission extraction logic would go based on the `permission_system`.
-        # For example, for POSIX: os.stat, os.access, etc.
-        # For ACL: libraries like `acl` might be used.
-        # For S3, boto3 would be used to retrieve bucket/object ACLs.
-        logging.warning("Directory scanning not yet fully implemented.  Returning an empty list.")
+        logging.error("Directory input is not supported. Provide a file containing permission data.")
+        raise ValueError("Directory input is not supported. Provide a file containing permission data.")
 
     else:
         logging.error(f"Invalid input path: {input_path}. Must be a file or directory.")
@@ -122,14 +118,18 @@ def filter_permission_data(data: List[Dict[str, Any]], include_patterns: List[st
 
     return filtered_data
 
-def generate_data_dictionary(permission_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+def generate_data_dictionary(permission_data: List[Dict[str, Any]], permission_system: str = "posix") -> Dict[str, Any]:
     """
     Generates a data dictionary from the loaded permission data.
     This function assumes permission data has the format:
     [{"resource_path": "/path/to/resource", "permissions": {"read": True, "write": False, ...}}, ...]
+    Each entry gets a plain description built from a fixed template over
+    its permission keys, the permission system used, and the list of
+    other resources that share at least one granted permission key.
     """
     data_dictionary: Dict[str, Any] = {}
 
+    valid_items = []
     for item in permission_data:
         resource_path = item.get("resource_path")
         permissions = item.get("permissions")
@@ -140,8 +140,28 @@ def generate_data_dictionary(permission_data: List[Dict[str, Any]]) -> Dict[str,
         if not permissions:
              logging.warning(f"Skipping entry: Missing permissions for {resource_path}")
              continue
+        valid_items.append((resource_path, permissions))
 
-        data_dictionary[resource_path] = permissions
+    for resource_path, permissions in valid_items:
+        keys = sorted(permissions.keys())
+        settings = ", ".join(f"{key}={permissions[key]}" for key in keys)
+        description = (
+            f"Resource {resource_path} recorded under the {permission_system} "
+            f"permission system with permissions: {settings}."
+        )
+        granted = {key for key in keys if permissions[key]}
+        related = sorted(
+            other_path
+            for other_path, other_permissions in valid_items
+            if other_path != resource_path
+            and granted.intersection(key for key, value in other_permissions.items() if value)
+        )
+        data_dictionary[resource_path] = {
+            "permissions": permissions,
+            "description": description,
+            "permission_system": permission_system,
+            "related_resources": related,
+        }
 
     return data_dictionary
 
@@ -170,10 +190,20 @@ def print_data_dictionary(data_dictionary: Dict[str, Any]) -> None:
     console.print(table)
 
 
-def main() -> None:
+def main() -> int:
     """Main function to orchestrate the permission data dictionary generation."""
     parser = setup_argparse()
     args = parser.parse_args()
+
+    if os.path.isdir(args.input_path):
+        logging.error("Directory input is not supported. Provide a file containing permission data.")
+        print("Error: Directory input is not supported. Provide a file containing permission data.")
+        return 1
+
+    if os.path.realpath(args.output_file) == os.path.realpath(args.input_path):
+        logging.error("Output file must not be the input file. Refusing to overwrite the input.")
+        print("Error: Output file must not be the input file. Refusing to overwrite the input.")
+        return 1
 
     try:
         # 1. Load the permission data
@@ -183,7 +213,12 @@ def main() -> None:
         filtered_data = filter_permission_data(permission_data, args.include_patterns, args.exclude_patterns)
 
         # 3. Generate the data dictionary.
-        data_dictionary = generate_data_dictionary(filtered_data)
+        data_dictionary = generate_data_dictionary(filtered_data, args.permission_system)
+
+        if not data_dictionary:
+            logging.error("No permission entries found in the input file. No dictionary was saved.")
+            print("Error: No permission entries found in the input file. No dictionary was saved.")
+            return 1
 
         # 4. Save the data dictionary to a file.
         save_data_dictionary(data_dictionary, args.output_file)
@@ -193,13 +228,18 @@ def main() -> None:
 
     except ValueError as e:
         logging.error(f"Input error: {e}")
+        return 1
     except FileNotFoundError as e:
         logging.error(f"File not found: {e}")
+        return 1
     except Exception as e:
         logging.exception(f"An unexpected error occurred: {e}")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
     # Example Usage:
     # python main.py --input-path input.json --output-file output.json --permission-system acl --include-patterns "*.txt" --exclude-patterns "secret.txt"
-    main()
+    import sys
+    sys.exit(main())
