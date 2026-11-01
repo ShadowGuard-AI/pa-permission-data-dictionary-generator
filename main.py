@@ -63,6 +63,11 @@ def load_permission_data(input_path: str, permission_system: str) -> List[Dict[s
     """
     Loads permission data from the specified input path, handling different permission systems.
     """
+    # The permission_system argument changes nothing in here: acl,
+    # posix, and s3 all go through the same json.load of the same
+    # expected shape. The chosen system only gets logged here and
+    # stamped into each output entry later. Treat it as a label I
+    # record, not a parser I switch.
     logging.info(f"Loading permission data from {input_path} (system: {permission_system})")
     data: List[Dict[str, Any]] = []
 
@@ -150,6 +155,12 @@ def generate_data_dictionary(permission_data: List[Dict[str, Any]], permission_s
             f"permission system with permissions: {settings}."
         )
         granted = {key for key in keys if permissions[key]}
+        # This pairwise pass makes generation quadratic in the number
+        # of entries, fine for a hand sized export and slow on a real
+        # estate dump. Duplicate paths also land here: the dictionary
+        # keeps only the last entry per path, while this list still
+        # holds every copy, and the path inequality below excludes a
+        # duplicate from its own related list.
         related = sorted(
             other_path
             for other_path, other_permissions in valid_items
@@ -185,6 +196,9 @@ def print_data_dictionary(data_dictionary: Dict[str, Any]) -> None:
     table.add_column("Permissions", style="green")
 
     for resource_path, permissions in data_dictionary.items():
+        # Despite the loop variable's name, this value is the whole
+        # entry dict, so the console column prints the description and
+        # related resources too, not only the permissions.
         table.add_row(resource_path, str(permissions))
 
     console.print(table)
